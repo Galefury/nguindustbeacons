@@ -1,5 +1,6 @@
 // Alchemy.cpp : Defines the entry point for the console application.
 // 
+#pragma warning(disable : 4996)
 
 #include "stdafx.h"
 #include <string.h>
