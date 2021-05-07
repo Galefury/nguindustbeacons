@@ -42,6 +42,7 @@ int iBestVal;
 bool bDebug = false;
 HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
 int beaconcolor = 15;
+REFINEMENT_SCHEDULE* r;
 
 int main(int argc, char* argv[])
 {
@@ -117,22 +118,56 @@ int main(int argc, char* argv[])
     bestscore = 0;
     for (i = 0; i < iTries; i++)
     {
-        if (bDebug)
-        {
-            cout << "Try #" << i + 1;
-        }
         Shuffle();
         InitBeaconAndTypeMaps(options); // Reset maps
         RecalculateScoremaps();
         mapbasevalue = floor(TotalScore());
 
         OptimizeByReplacement();
+
         RecalculateScoremaps();
         mapfinalvalue = floor(TotalScore());
 
+        // Check the refinement schedule to see if there is something to do for this result
+        if (doRefinements) {
+            // Update scores for initial refinement step
+            if (RefinementSchedule.size() > 0) {
+                RefinementSchedule[0].WorstScore = mapfinalvalue < RefinementSchedule[0].WorstScore ? mapfinalvalue : RefinementSchedule[0].WorstScore;
+                RefinementSchedule[0].BestScore = mapfinalvalue > RefinementSchedule[0].BestScore ? mapfinalvalue : RefinementSchedule[0].BestScore;
+            }
+            for (int j = 0; j < RefinementSchedule.size(); j++) {
+                r = &(RefinementSchedule[j]);
+                if (mapfinalvalue >= r->BestScore - r->RunWhenThisCloseToBest * (r->BestScore - r->WorstScore)) {
+                    if (bDebug) {
+                        cout << "Running Refinement. Score: " << mapfinalvalue << " Remove Beacons: " << r->BeaconsToRemove << " Best: " << r->BestScore << " Worst: " << r->WorstScore << "\n";
+                    }
+                    OptimizeByRefinement(r->BeaconsToRemove, r->LoopsUntilGivingUp, r->RollbackBadChanges);
+                    RecalculateScoremaps();
+                    mapfinalvalue = floor(TotalScore());
+                    // Update scores for the refinement schedule
+                    if (j + 1 < RefinementSchedule.size()) {
+                        r = &(RefinementSchedule[j + 1]);
+                        r->WorstScore = mapfinalvalue < r->WorstScore ? mapfinalvalue : r->WorstScore;
+                        r->BestScore = mapfinalvalue > r->BestScore ? mapfinalvalue : r->BestScore;
+                    }
+                }
+                else {
+                    break;
+                }
+            }
+        }
+
         if (mapfinalvalue > bestscore + 0.001) {
+            // Try to refine the map even further
+            if (doRemovals) {
+                OptimizeByRemoveAndReplace();
+                RecalculateScoremaps();
+                mapfinalvalue = floor(TotalScore());
+                DisplayResults(maps, options, beacons, beacontype);
+            }
             bestscore = mapfinalvalue;
             CopyMap(beaconmap, bestbeaconmap, typemap, besttypemap);
+            DisplayResults(maps, options, beacons, beacontype);
         }
     }
 
@@ -491,7 +526,7 @@ int  DisplayResults (int maps, int options, int beacons, int beacontype)
             {
                 case BTYPE_SPEED:
                 {
-                    beaconcolor = 9;
+                    beaconcolor = 11;
                     break;
                 }
                 case BTYPE_PROD:
@@ -823,10 +858,12 @@ bool PlaceBestBeacon() {
 
     // If best beacon improves score, use it
     if (p.scorediff > 0) {
+        /*
         if (bDebug && beaconmap[p.place.x][p.place.y] != BEACON_EMPTY) {
             cout << "Replaced " << beaconmap[p.place.x][p.place.y] << " type " << typemap[p.place.x][p.place.y] << " with " << p.beacon << " type " << p.type;
             cout << " in location " << p.place.x << " " << p.place.y << "\n";
         }
+        */
         // Update effect map and scoremap
         CalculateScoreDiff(p.beacon, p.type, beaconmap[p.place.x][p.place.y], typemap[p.place.x][p.place.y], p.place.x, p.place.y, true);
         // Update beacon map
@@ -840,7 +877,7 @@ bool PlaceBestBeacon() {
 
 // Optimizes a map by finding the best beacon to place until no improvement can be found by replacing any beacon
 // 
-// This algorithm for example will not usually move a beacon for profid. To move a beacon it has to be profitably removed, and then a new beacon has to be profitably placed somewhere else
+// This algorithm for example will not usually move a beacon for profit. To move a beacon it has to be profitably removed, and then a new beacon has to be profitably placed somewhere else
 // This is often not possible, and these (possibly easy to see) improvements will be missed
 int OptimizeByReplacement() {
     bool done = false;
@@ -860,3 +897,165 @@ int OptimizeByReplacement() {
     return 0;
 }
 
+bool RemoveAndReplaceOnce() {
+    // Remove a beacon, put down the best new one, check the score difference. Keep the best.
+    int x, y, x_best = -1, y_best = -1;
+    double lostscore, bestscorechange = 0;
+    PLACEMENT p;
+    BEACON oldbeacon;
+    BTYPE oldtype;
+    for (int i = 0; i < iTotalArea; i++) {
+        x = searchorder[i] / MAX_COL;
+        y = searchorder[i] % MAX_COL;
+
+        if (beaconmap[x][y] >= FIRST_BEACON) {
+            // Remove the beacon
+            oldbeacon = beaconmap[x][y];
+            oldtype = typemap[x][y];
+            lostscore = CalculateScoreDiff(BEACON_EMPTY, BTYPE_EMPTY, oldbeacon, oldtype, x, y, true);
+            beaconmap[x][y] = BEACON_EMPTY;
+            typemap[x][y] = BTYPE_EMPTY;
+
+            // Figure out what is best to place and keep track of best
+            p.scorediff = 0;
+            p = FindBestBeacon();
+            if (p.scorediff > 0 && (lostscore + p.scorediff > bestscorechange + 0.01)) {
+                bestscorechange = lostscore + p.scorediff;
+                x_best = x;
+                y_best = y;
+                if (bDebug)
+                    cout << bestscorechange << " lost: " << lostscore << " gain: " << p.scorediff << "\n";
+            }
+
+            // Place the beacon back in its spot
+            CalculateScoreDiff(oldbeacon, oldtype, BEACON_EMPTY, BTYPE_EMPTY, x, y, true);
+            beaconmap[x][y] = oldbeacon;
+            typemap[x][y] = oldtype;
+        }
+    }
+
+    // Found something profitable? Do that best removal. If not, return false.
+    if (bestscorechange > 0) {
+        CalculateScoreDiff(BEACON_EMPTY, BTYPE_EMPTY, beaconmap[x_best][y_best], typemap[x_best][y_best], x_best, y_best, true);
+        beaconmap[x_best][y_best] = BEACON_EMPTY;
+        typemap[x_best][y_best] = BTYPE_EMPTY;
+    }
+    else {
+        return false;
+    }
+
+    // Optimize by Replacement until we can do no more
+    bool done = false;
+    while (!done) {
+        done = !PlaceBestBeacon(); // Will return false when it couldn't place anything
+    }
+
+    if (bDebug) {
+        cout << TotalScore() << "\n";
+    }
+
+    return true;
+}
+
+// Tries removing each beacon, checks which is the best beacon to put down from there, and keeps the one with the most profit. Runs the regular optimization from there.
+// Repeats until no improvement by removing and adding a new beacon can be found.
+int OptimizeByRemoveAndReplace() {
+    bool done = false;
+    int stepcounter = 0;
+    while (!done) {
+        RecalculateScoremaps();
+        done = !RemoveAndReplaceOnce(); // Will return false when it couldn't place anything
+
+        stepcounter++;
+        if (bDebug)
+            cout << "Step: " << stepcounter << "\n";
+    }
+
+    return 0;
+}
+
+// Tries removing each beacon and optimizing from there, but does not look for the best option, it just keeps going.
+// Shuffles at the start of each loop
+// Will remove BeaconsToRemove beacons at a time, and loop through all beacons without finding improvements LoopsUntilGivingUp times before stopping.
+// Will roll back the removal if score is worse after running the optimizer if told to by RollbackBadChanges
+int OptimizeByRefinement(int BeaconsToRemove, int LoopsUntilGivingUp, bool RollbackBadChanges) {
+    bool done = false, doneMinor;
+    int x, y, BeaconsRemoved, LousyLoops = 0;
+    double scorestart, topscore, currentscore = 0., lastscore;
+    BEACON topbeacons[MAX_ROW][MAX_COL];
+    BTYPE toptypes[MAX_ROW][MAX_COL];
+
+    // If we want to be able to roll back, remember current map
+    if (RollbackBadChanges) {
+        RecalculateScoremaps();
+        topscore = TotalScore();
+        CopyMap(beaconmap, topbeacons, typemap, toptypes);
+    }
+
+    while (!done) {
+        Shuffle();
+        RecalculateScoremaps();
+        scorestart = TotalScore();
+        BeaconsRemoved = 0;
+
+        for (int i = 0; i < iTotalArea; i++) {
+            x = searchorder[i] / MAX_COL;
+            y = searchorder[i] % MAX_COL;
+
+            // Remove beacon
+            if (beaconmap[x][y] >= FIRST_BEACON) {
+                CalculateScoreDiff(BEACON_EMPTY, BTYPE_EMPTY, beaconmap[x][y], typemap[x][y], x, y, true);
+                beaconmap[x][y] = BEACON_EMPTY;
+                typemap[x][y] = BTYPE_EMPTY;
+                BeaconsRemoved++;
+            }
+
+            // Enough beacons removed (or about to end the loop), run the optimizer
+            if (BeaconsRemoved >= BeaconsToRemove || i == iTotalArea - 1) {
+                doneMinor = false;
+                while (!doneMinor) {
+                    doneMinor = !PlaceBestBeacon(); // Will return false when it couldn't place anything
+                }
+
+                // Output a debug message if worse than before
+                if (bDebug && !RollbackBadChanges) {
+                    lastscore = currentscore;
+                    currentscore = TotalScore();
+                    if (currentscore + 0.001 < lastscore) {
+                        cout << "Score got worse. Old: " << lastscore << " New: " << currentscore << "\n";
+                    }
+                }
+
+                // Roll back to best map if worse than before or update best map if better
+                if (RollbackBadChanges) {
+                    currentscore = TotalScore();
+                    // Roll back if worse
+                    if (currentscore + 0.001 < topscore) {
+                        CopyMap(topbeacons, beaconmap, toptypes, typemap);
+                        RecalculateScoremaps();
+                    }
+                    // Update best if better
+                    else if (currentscore > topscore + 0.001) {
+                        topscore = currentscore;
+                        CopyMap(beaconmap, topbeacons, typemap, toptypes);
+                    }
+                }
+
+                BeaconsRemoved = 0;
+            }
+        }
+
+        // Count loops without improvement in a row
+        if (scorestart + 0.001 > TotalScore()) {
+            LousyLoops++;
+        }
+        else {
+            LousyLoops = 0;
+        }
+
+        // Stop when too many loops without improvement were run in a row
+        done = (LousyLoops >= LoopsUntilGivingUp);
+    }
+
+    return 0;
+}

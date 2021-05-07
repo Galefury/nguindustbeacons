@@ -96,6 +96,16 @@ struct PLACEMENT {
 	BTYPE type;
 };
 
+// Holds information on when to run which refinement
+struct REFINEMENT_SCHEDULE {
+	double RunWhenThisCloseToBest; // Minimum score to run this = BestScore - RunWhenThisCloseToBest * (BestScore - WorstScore)
+	int BeaconsToRemove;
+	int LoopsUntilGivingUp;
+	bool RollbackBadChanges;
+	double WorstScore;
+	double BestScore;
+};
+
 // Settings:
 bool doReplace = true;
 //vector<BEACON> BeaconsToUse = { BEACON_EMPTY, BEACON_BOX, BEACON_KNIGHT, BEACON_ARROW_UP, BEACON_ARROW_DOWN, BEACON_ARROW_RIGHT, BEACON_ARROW_LEFT};
@@ -104,6 +114,14 @@ vector<BTYPE> TypesToUse = { BTYPE_SPEED, BTYPE_PROD, BTYPE_COST };
 //vector<BTYPE> TypesToUse = { BTYPE_COST};
 double CostFactor = 10.; // How many tiles are needed to produce ingredients for what you're placing (without speed or prod beacons)
 double SpeedCap = 1000.; // How much speed increase to cap, more will not help (capped speed divided by unbeaconed speed)
+bool doRemovals = false; // Do another optimization pass with remove and replace
+bool doRefinements = true; // Do another optimization pass with refinement according to the refinement schedule
+vector<REFINEMENT_SCHEDULE> RefinementSchedule = {
+	{0.03, 1, 1, false, INFINITY, 0}, // Remove a beacon and place a new one, score should never get worse by doing this
+	{0.05, 2, 10, true, INFINITY, 0}, // Remove two beacons
+	{0.1, 3, 50, true, INFINITY, 0}, // Remove three beacons
+	{0.2, 10, 100, true, INFINITY, 0 } // Remove 10 beacons
+};
 
 
 void SetWhichToCheck (int maps, int options);
@@ -129,7 +147,10 @@ double TotalScore();
 PLACEMENT FindBestBeaconPosition(BEACON beacon, BTYPE type);
 PLACEMENT FindBestBeacon();
 bool PlaceBestBeacon();
+bool RemoveAndReplaceOnce();
 
 
 // Optimizers
 int OptimizeByReplacement();
+int OptimizeByRemoveAndReplace();
+int OptimizeByRefinement(int BeaconsToRemove, int LoopsUntilGivingUp, bool RollbackBadChanges);
